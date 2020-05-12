@@ -1,6 +1,8 @@
 
+import traceback
 import random
 import vk_api
+import sys
 import asyncio
 import time
 from collections import defaultdict
@@ -18,7 +20,8 @@ from vk_api.bot_longpoll import VkBotLongPoll, VkBotEvent, VkBotMessageEvent, Vk
 #     print(what)
 
 def get_name(id0):
-	return vk.users.get(id0)[0]['first_name'] + ' ' + vk.users.get(id0)[0]['last_name']
+	return vk.users.get(user_ids=[id0])[0]['first_name'] + \
+	' ' + vk.users.get(user_ids=[id0])[0]['last_name']			
 
 class Master():
 
@@ -30,32 +33,45 @@ class Master():
 		'contact_now',  # boolean
 		'progress',  # int, прогресс в угадывании слова
 		'lead_words',  # слова ведущего во время контакта
-		'contact_words'  # слова остальных участников контакта
+		'contact_words',  # слова остальных участников контакта
+		'end',  # отгадано ли секретное слово
+		'first_game'  # является ли текущая игра первой
 	)
 
 	def __init__(self, room_id):
 		self.room_id = room_id
-		self.keyword = None
+		self.first_game = True
 		self.users = set()
 		self.contact_now = False
+		self.keyword = None
 		self.lead_id = None
-		self.progress = 0
+		self.progress = 1
 		self.lead_words = set()
 		self.contact_words = {}
+		self.end = False
+
+	def sms(self, s):
+		vk.messages.send(  # Отправляем собщение
+			# user_id=event.raw['object']['from_id'],
+			# chat_id=event.raw['object']['id'],
+			group_id=GROUP_ID,
+			peer_id=self.room_id,
+			random_id=random.randint(1, 10 ** 7),
+			# sticker_id=12710,
+			message=s
+		)		
 
 	def start(self):
-		# Задаются игроки, ведущий и его тайное слово
-		vk.messages.send(  # Отправляем собщение
-					# user_id=event.raw['object']['from_id'],
-					# chat_id=event.raw['object']['id'],
-					group_id=GROUP_ID,
-					peer_id=self.room_id,
-					random_id=random.randint(1, 10 ** 7),
-					# sticker_id=12710,
-					message="""Привет!
-					 Назначьте бота администратором, а потом отправьте сообщение, чтобы продолжить
-					 """
+		# Приветствие
+		if self.first_game:
+			self.sms(
+				"""Привет!
+				Назначьте бота администратором, а потом отправьте сообщение, чтобы продолжить
+				Чтобы узнать команды бота, напишите "Помощь"
+				"""
 				)
+		else:
+			self.sms('Кто ведущий?')
 
 	async def processing(self, ev):
 		# обработка нового сообщения
@@ -66,29 +82,28 @@ class Master():
 			loop.run_in_executor(None, self.make_contact)
 		elif ev.raw['object']['text'] == 'Помощь':
 			self.help()
+		elif ev.raw['object']['text'] == 'Я ведущий':
+			self.set_lead(ev.raw['object']['from_id'])
 		else:
 			print('was')
-		if ev.raw['object']['text'] == 'Я ведущий':
-			self.set_lead(ev.raw['object']['from_id'])
 
 	def set_users(self):
-		inf = vk.messages.getConversationMembers(
-			peer_id=self.room_id,
-			group_id=GROUP_ID
-		)
+		try:
+			inf = vk.messages.getConversationMembers(
+				peer_id=self.room_id,
+				group_id=GROUP_ID
+			)
+		except Exception as e:
+			print('===', e)
+			self.sms('Сделайте бота администратором')
+			return
 		print('====================================================')
 		print(inf)
 		# print(inf['profiles'])
 		for profile in inf['profiles']:
 			self.users.add(profile['id'])
 			user_to_room[profile['id']] = self.room_id
-		vk.messages.send(
-			group_id=GROUP_ID,
-			peer_id=self.room_id,
-			random_id=random.randint(1, 10 ** 7),
-			# sticker_id=12710,
-			message='Кто ведущий?'
-		)
+		self.sms('Кто ведущий?')
 
 	def new_player(self, ev):
 		if 'action' in ev.raw['object'] \
@@ -100,14 +115,10 @@ class Master():
 		return False
 
 	def set_lead(self, id0):
-		self.lead_id = id0
-		vk.messages.send(
-			group_id=GROUP_ID,
-			peer_id=self.room_id,
-			random_id=random.randint(1, 10 ** 7),
-			# sticker_id=12710,
-			message=f'{get_name(id0)} ведущий'
-		)
+		if self.lead_id is None:
+			self.lead_id = id0
+			self.sms(f'{get_name(id0)} ведущий')
+			self.sms('Ведущий должен написать в личные сообщения боту своё секретное слово')
 
 	def exit_player(self, ev):
 		if 'action' in ev.raw['object'] \
@@ -120,70 +131,97 @@ class Master():
 
 	def make_contact(self):
 		print('*')
+		if self.lead_id is None:
+			self.sms('Не объявлен ведущий')
+			return
+		if self.keyword is None:
+			self.sms('Ведущий не объявил ключевое слово')
+			return
 
-		vk.messages.send(
-			group_id=GROUP_ID,
-			peer_id=self.room_id,
-			random_id=random.randint(1, 10 ** 7),
-			# sticker_id=12710,
-			message=f"""Контакт!.
-					Идёт отсчёт: 10 секунд"""
+		self.sms("""Контакт!
+			Идёт отсчёт: 20 секунд"""
 		)
+
 		try:
+
 			self.contact_now = True
+
 			wait0()
+
 			self.contact_now = False
 			result = self.check()
-			vk.messages.send(
-				group_id=GROUP_ID,
-				peer_id=self.room_id,
-				random_id=random.randint(1, 10 ** 7),
-				# sticker_id=12710,
-				message=result
-			)
 
-			s = ''
+			self.sms(result)
+			if result == 'Контакт прошел успешно':
+				if self.progress == len(self.keyword):
+					self.sms('Секретное слово отгадано')
+					self.end = True
+				else:
+					self.sms(f'Следующая буква -- {self.keyword[self.progress]}')
+					self.progress += 1
+
+			s = 'Названные слова:\n'
 			for key, value in self.contact_words.items():
+				if value == self.keyword:
+					self.sms(get_name(key) + ' отгадал(а) секретное слово')
+					self.end = True
 				s += get_name(key) + ': ' + value + '\n'
 
-			vk.messages.send(
-				group_id=GROUP_ID,
-				peer_id=self.room_id,
-				random_id=random.randint(1, 10 ** 7),
-				# sticker_id=12710,
-				message=f'{get_name(self.lead_id)}: {self.lead_words}\n' + s
-			)
+			self.sms(s)
+			self.lead_words = set()
+			self.contact_words = {}
+			self.final()
+			
 		except Exception as e:
+			exc_type, exc_value, exc_traceback = sys.exc_info()
+			print("*** print_tb:")
+			traceback.print_tb(exc_traceback, file=sys.stdout)
 			print('!!!', e)
 
 	def check(self):
 		# Проверка на удачность контакта
+		"""
 		check_dict = defaultdict(set) # word: {id1, id2...}
 		for id0, word in self.contact_words.items():
 			check_dict[word].add(id0)
 		check_set = set(check_dict.keys()) - self.lead_words
-		checklist1 = filter(lambda x: check_dict[x].len() > 1, list(check_set))
-		checklist2 = filter(lambda x: check_dict[x].len() > 1, list(self.lead_words))
+		checklist1 = filter(lambda x: len(check_dict[x]) > 1, list(check_set))
+		checklist2 = filter(lambda x: len(check_dict[x]) > 1, list(self.lead_words))
 		if checklist1:
 			return 'Контакт прошел успешно'
 		if not checklist2:
 			return 'Игроки не сконтактировали'
 		if checklist2:
 			return 'Ассоциация сбита'
+		"""
+		check_set = set()
+		for id0, word in self.contact_words.items():
+			if word not in self.lead_words and len(word) >= self.progress \
+			and word[:self.progress] == self.keyword[:self.progress]:
+				if word in check_set:
+					return 'Контакт прошел успешно'
+				check_set.add(word)
+		return 'Контакт не состоялся'
 
 	def help(self):
-		vk.messages.send(
-			group_id=GROUP_ID,
-			peer_id=self.room_id,
-			random_id=random.randint(1, 10 ** 7),
-			# sticker_id=12710,
-			message='Правила игры'
+		self.sms(
+			"""
+			"Я ведущий" -- назначает написавшего игрока ведущим, если он ещё не определен
+			"Контакт" -- начинает контакт
+			"Помощь" -- присылает список команд
+			Правила игры опубликованы на странице сообщества
+			"""
 		)
 
 	def processing_ls(self, ev):
 		# обработка лс
 		if self.keyword is None and self.lead_id is not None:
-			self.keyword = ev.raw['object']['text']
+			self.keyword = ev.raw['object']['text'].strip()
+			if ' ' not in self.keyword:
+				self.sms(f'{self.keyword[0]} -- первая буква секретного слова')
+			else:
+				self.sms('Ведущий должен назвать одно слово')
+				self.keyword = None
 		if self.contact_now:
 			if ev.raw['object']['from_id'] == self.lead_id:
 				self.lead_words.add(ev.raw['object']['text'])
@@ -191,7 +229,18 @@ class Master():
 				self.contact_words[ev.raw['object']['from_id']] = ev.raw['object']['text']
 
 	def final(self):
-		pass
+		if self.end:
+			self.sms('Слово отгадано, начать новую игру (Да/Нет)')
+			self.new_game()
+
+	def new_game(self):
+		self.keyword = None
+		self.lead_id = None
+		self.progress = 1
+		self.lead_words = set()
+		self.contact_words = {}
+		self.end = False
+		self.sms('Кто ведущий?')
 
 
 def new_room(ev):
@@ -204,7 +253,7 @@ def new_room(ev):
 	return False
 
 
-def wait0(delay=10):
+def wait0(delay=20):
 	print('Start waiting!')
 	print(datetime.now().isoformat())
 	time.sleep(delay)
