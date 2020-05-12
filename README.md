@@ -1,2 +1,2 @@
-# Project_vk_api
-Project for game "Contact"
+# Вк бот для игры "Контакт"
+https://vk.com/club194517385
